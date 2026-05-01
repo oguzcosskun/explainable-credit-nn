@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific
+data/raw/
+data/processed/
+*.csv
+*.xlsx
+reports/figures/*.png
+!reports/figures/.gitkeep
+
+# Notebooks output
+notebooks/.ipynb_checkpoints/
+
+# Models
+*.pt
+*.pth
+*.pkl
+
+# Streamlit cache
+.streamlit/secrets.toml
