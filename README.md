@@ -27,7 +27,7 @@ post-hoc explainability (SHAP, Integrated Gradients), counterfactual recourse
     ├── notebooks/             # EDA and exploratory experiments
     ├── src/
     │   ├── preprocessing/     # unified preprocessing pipeline
-    │   ├── models/            # FNN, CNN, TabNet implementations
+    │   ├── models/            # FNN, TabNet implementations
     │   ├── explainers/        # SHAP, IG, DiCE wrappers
     │   └── evaluation/        # OpenXAI metric scripts
     ├── dashboard/             # Streamlit application
