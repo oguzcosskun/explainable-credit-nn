@@ -45,7 +45,7 @@ def prepare(dataset_name="german_credit", model_family="fnn", test_size=0.2, ran
     # Kategorik sütunlar: mode ile doldur
     categorical_cols = X.select_dtypes(include=["object"]).columns.tolist()
     for col in categorical_cols:
-        X[col] = X[col].fillna(X[col].mode()[0])
+        X[col] = X[col].fillna("Unknown")
     
     # === 4. ENCODING ===
     if model_family == "fnn":
