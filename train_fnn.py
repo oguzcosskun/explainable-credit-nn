@@ -1,7 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
-
+os.environ["MKL_THREADING_LAYER"] = "GNU"
 import sys
 import numpy as np
 from sklearn.metrics import (roc_auc_score, recall_score,
