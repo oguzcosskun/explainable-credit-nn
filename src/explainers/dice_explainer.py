@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import dice_ml
 from dice_ml import Dice
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.abspath("."))
 from src.preprocessing.pipeline import prepare
@@ -22,7 +23,7 @@ def run_dice_explanation(n_counterfactuals=3):
     print("DiCE COUNTERFACTUALS -- FNN on German Credit")
     print("=" * 60)
 
-    # === 1. MODELİ EĞİT (encoded veriyle) ===
+    # === 1. MODELİ EĞİT ===
     print("\n[1/3] Training FNN model...")
     SEED = 21
     torch.manual_seed(SEED)
@@ -59,33 +60,26 @@ def run_dice_explanation(n_counterfactuals=3):
     model.eval()
     print("  Model trained (seed=21).")
 
-    # === 2. DiCE İÇİN HAM VERİYİ HAZIRLA ===
+    # === 2. DiCE ICIN HAM VERIYI HAZIRLA ===
     print("\n[2/3] Preparing raw data for DiCE...")
 
-    # Ham CSV'yi oku — orijinal kategorik değerlerle
     df = pd.read_csv("data/raw/german_credit_data.csv")
     if "Unnamed: 0" in df.columns:
         df = df.drop(columns=["Unnamed: 0"])
 
-    # Missing values — Unknown ile doldur (pipeline ile aynı)
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].fillna("Unknown")
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].fillna("Unknown")
 
-    # Target: good=0, bad=1
     df["Risk"] = df["Risk"].map({"good": 0, "bad": 1})
 
-    # Numerik sütunları normalize et
     numeric_cols = ["Age", "Job", "Credit amount", "Duration"]
     scaler = MinMaxScaler()
     df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
 
-    # DiCE için model wrapper
-    # DiCE ham (kategorik dahil) veri verecek,
-    # wrapper bunu encode edip modele verecek
     feature_cols     = [c for c in df.columns if c != "Risk"]
     categorical_cols = ["Sex", "Housing", "Saving accounts",
                         "Checking account", "Purpose"]
-    continuous_cols  = numeric_cols
 
     class FNNWrapper:
         def __init__(self, pytorch_model, feature_cols, cat_cols):
@@ -99,19 +93,15 @@ def run_dice_explanation(n_counterfactuals=3):
             else:
                 X = pd.DataFrame(X, columns=self.feature_cols)
 
-            # One-hot encode (pipeline ile aynı mantık)
             X_enc = pd.get_dummies(X, columns=self.cat_cols, drop_first=True)
 
-            # Eksik sütunları ekle (train sırasında görülmeyen kategoriler)
             for col in X_train.columns:
                 if col not in X_enc.columns:
                     X_enc[col] = 0.0
 
-            # Sütun sırasını eşitle
-            X_enc = X_enc[X_train.columns]
-            X_enc = X_enc.astype(float)
+            X_enc = X_enc[X_train.columns].astype(float)
+            X_t   = torch.tensor(X_enc.values, dtype=torch.float32)
 
-            X_t = torch.tensor(X_enc.values, dtype=torch.float32)
             with torch.no_grad():
                 proba_bad  = self.model(X_t).numpy().flatten()
             proba_good = 1 - proba_bad
@@ -119,71 +109,85 @@ def run_dice_explanation(n_counterfactuals=3):
 
     wrapper = FNNWrapper(model, feature_cols, categorical_cols)
 
-    # DiCE data ve model nesneleri
     d = dice_ml.Data(
         dataframe=df,
-        continuous_features=continuous_cols,
+        continuous_features=numeric_cols,
         outcome_name="Risk"
     )
     m   = dice_ml.Model(model=wrapper, backend="sklearn")
     exp = Dice(d, m, method="random")
-    print("  DiCE explainer ready with raw (categorical) features.")
+    print("  DiCE explainer ready.")
 
-    # === 3. COUNTERFACTUAL ÜRET ===
+    # === 3. COUNTERFACTUAL URET ===
     print("\n[3/3] Generating counterfactuals...")
 
-    # Test setinden bad credit örneklerini bul
-    # Ham df'den aynı indeksleri al
-    from sklearn.model_selection import train_test_split
-    _, df_test = train_test_split(df, test_size=0.2,
-                                   random_state=SEED, stratify=df["Risk"])
-    df_test = df_test.reset_index(drop=True)
-
+    _, df_test = train_test_split(
+        df, test_size=0.2, random_state=SEED, stratify=df["Risk"]
+    )
+    df_test  = df_test.reset_index(drop=True)
     bad_test = df_test[df_test["Risk"] == 1].reset_index(drop=True)
     print(f"  Found {len(bad_test)} rejected applicants in test set.")
 
-    # Immutable features — asla önerme
-    immutable = ["Age", "Sex"]
+    immutable     = ["Age", "Sex"]
     vary_features = [f for f in feature_cols if f not in immutable]
-
-    n_show = min(3, len(bad_test))
+    n_show        = min(3, len(bad_test))
 
     for i in range(n_show):
         instance = bad_test.iloc[[i]][feature_cols]
         prob     = wrapper.predict_proba(instance)[0][1]
 
+        # Gercek degerlere cevir
+        inv = scaler.inverse_transform(instance[numeric_cols].values)[0]
+        age_real    = int(inv[numeric_cols.index("Age")])
+        dur_real    = int(inv[numeric_cols.index("Duration")])
+        credit_real = int(inv[numeric_cols.index("Credit amount")])
+
         print(f"\n  --- Applicant #{i+1} (default prob: {prob:.2f}) ---")
         print(f"  Original profile:")
-        print(f"    Age:              {instance['Age'].values[0]:.2f} (normalized)")
-        print(f"    Duration:         {instance['Duration'].values[0]:.2f} (normalized)")
-        print(f"    Credit amount:    {instance['Credit amount'].values[0]:.2f} (normalized)")
+        print(f"    Age:              {age_real} years")
+        print(f"    Duration:         {dur_real} months")
+        print(f"    Credit amount:    {credit_real} DM")
         print(f"    Checking account: {instance['Checking account'].values[0]}")
         print(f"    Saving accounts:  {instance['Saving accounts'].values[0]}")
 
         try:
-            cf = exp.generate_counterfactuals(
+            cf    = exp.generate_counterfactuals(
                 instance,
                 total_CFs=n_counterfactuals,
                 desired_class="opposite",
                 features_to_vary=vary_features
             )
-
             cf_df = cf.cf_examples_list[0].final_cfs_df
+
             if cf_df is not None and len(cf_df) > 0:
                 print(f"  Counterfactual suggestions (changes to get APPROVED):")
                 for j, (_, row) in enumerate(cf_df.iterrows()):
                     changes = []
                     for feat in feature_cols:
-                        orig = str(instance[feat].values[0])
-                        new  = str(row[feat])
-                        if orig != new:
-                            changes.append(f"{feat}: {orig} -> {new}")
+                        orig_val = instance[feat].values[0]
+                        new_val  = row[feat]
+                        if str(orig_val) != str(new_val):
+                            if feat in numeric_cols:
+                                idx_n = numeric_cols.index(feat)
+                                d_orig        = np.zeros(len(numeric_cols))
+                                d_new         = np.zeros(len(numeric_cols))
+                                d_orig[idx_n] = float(orig_val)
+                                d_new[idx_n]  = float(new_val)
+                                real_orig = scaler.inverse_transform([d_orig])[0][idx_n]
+                                real_new  = scaler.inverse_transform([d_new])[0][idx_n]
+                                changes.append(
+                                    f"{feat}: {real_orig:.0f} -> {real_new:.0f}"
+                                )
+                            else:
+                                changes.append(
+                                    f"{feat}: {orig_val} -> {new_val}"
+                                )
                     if changes:
                         print(f"\n    Scenario {j+1}:")
                         for c in changes:
                             print(f"      {c}")
                     else:
-                        print(f"\n    Scenario {j+1}: No changes (already approvable)")
+                        print(f"\n    Scenario {j+1}: No changes needed.")
             else:
                 print("    No valid counterfactuals found.")
 
