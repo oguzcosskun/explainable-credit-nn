@@ -120,7 +120,10 @@ def run_dice_explanation(n_counterfactuals=3, n_eval=50):
     bad_test = df_test[df_test["target"] == 1].reset_index(drop=True)
     print(f"  Found {len(bad_test)} rejected applicants in test set.")
 
-    immutable     = ["age", "personal_status", "foreign_worker"]
+    immutable = [
+    "age", "personal_status", "foreign_worker",
+    "property", "housing", "job", "telephone"
+]
     vary_features = [f for f in raw_feature_cols if f not in immutable]
 
     # === 3. VALIDITY + PROXIMITY (sayisal metrikler) ===

@@ -5,7 +5,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import sys
 import numpy as np
 from sklearn.metrics import (roc_auc_score, recall_score,
-                              precision_score, classification_report)
+                              precision_score, f1_score,
+                              classification_report)
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.abspath("."))
@@ -62,7 +63,6 @@ def train_and_evaluate():
     print("\n[3/5] Building model...")
     model = FNN(input_dim=X_train.shape[1], hidden_dims=[64, 32], dropout=0.4)
 
-    # Dynamic pos_weight — ekibin yontemi
     n_neg     = (y_train == 0).sum()
     n_pos     = (y_train == 1).sum()
     pos_w     = torch.tensor([n_neg / n_pos], dtype=torch.float32)
@@ -126,20 +126,30 @@ def train_and_evaluate():
     model.eval()
     with torch.no_grad():
         y_pred_proba = torch.sigmoid(model(X_test_t)).numpy().flatten()
-        y_pred       = (y_pred_proba >= 0.5).astype(int)
 
-    auc       = roc_auc_score(y_test, y_pred_proba)
-    recall    = recall_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_pred_proba)
 
     print("\n" + "=" * 60)
     print("RESULTS")
     print("=" * 60)
-    print(f"  AUC-ROC:   {auc:.4f}")
-    print(f"  Recall:    {recall:.4f}  (default class detection rate)")
-    print(f"  Precision: {precision:.4f}")
-    print()
-    print("Classification Report:")
+    print(f"  AUC-ROC: {auc:.4f}")
+
+    # Threshold analysis — ekibin yontemi
+    print("\n--- Threshold Analysis ---")
+    for thr in [0.5, 0.45, 0.4]:
+        y_pred_thr = (y_pred_proba >= thr).astype(int)
+        rec_thr  = recall_score(y_test, y_pred_thr)
+        prec_thr = precision_score(y_test, y_pred_thr)
+        f1_thr   = f1_score(y_test, y_pred_thr)
+        print(f"  Threshold={thr} | Recall={rec_thr:.4f} | "
+              f"Precision={prec_thr:.4f} | F1={f1_thr:.4f}")
+
+    # Default threshold=0.5 full report
+    y_pred = (y_pred_proba >= 0.5).astype(int)
+    recall    = recall_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+
+    print(f"\nClassification Report (threshold=0.5):")
     print(classification_report(y_test, y_pred,
                                  target_names=["Good (0)", "Bad (1)"]))
 
