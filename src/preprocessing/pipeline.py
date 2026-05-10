@@ -23,7 +23,7 @@ def prepare(dataset_name="german_credit", model_family="fnn",
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
 
     if model_family == "fnn":
-        X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
+        X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
     elif model_family == "tabnet":
         le = LabelEncoder()
         for col in cat_cols:
