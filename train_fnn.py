@@ -1,7 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_THREADING_LAYER"] = "GNU"
+
 import sys
 import numpy as np
 from sklearn.metrics import (roc_auc_score, recall_score,
@@ -29,11 +29,10 @@ def train_and_evaluate():
 
     # === 1. DATA ===
     print("\n[1/5] Loading and preparing data...")
-    X_train_full, X_test, y_train_full, y_test, class_weights = prepare(
+    X_train_full, X_test, y_train_full, y_test, _ = prepare(
         "german_credit", "fnn", random_state=SEED
     )
 
-    # Validation split from train (15% of total = ~18.75% of train)
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full, y_train_full,
         test_size=0.15, random_state=SEED, stratify=y_train_full
@@ -46,76 +45,81 @@ def train_and_evaluate():
     print(f"  Train: {X_train.shape[0]} samples, {X_train.shape[1]} features")
     print(f"  Val:   {X_val.shape[0]} samples")
     print(f"  Test:  {X_test.shape[0]} samples")
-    print(f"  Class weights: good={class_weights[0]:.3f}, bad={class_weights[1]:.3f}")
 
     # === 2. TENSORS ===
     print("\n[2/5] Converting to tensors...")
     X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
     y_train_t = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
     X_val_t   = torch.tensor(X_val.values,   dtype=torch.float32)
-    y_val_t   = torch.tensor(y_val.values,   dtype=torch.float32).unsqueeze(1)
     X_test_t  = torch.tensor(X_test.values,  dtype=torch.float32)
 
-    # Sample weights for weighted loss
-    sample_weights = torch.tensor(
-        [class_weights[int(y)] for y in y_train.values],
-        dtype=torch.float32
-    ).unsqueeze(1)
-
     train_loader = DataLoader(
-        TensorDataset(X_train_t, y_train_t, sample_weights),
+        TensorDataset(X_train_t, y_train_t),
         batch_size=32, shuffle=True
     )
 
     # === 3. MODEL ===
     print("\n[3/5] Building model...")
-    model     = FNN(input_dim=X_train.shape[1], hidden_dims=[64, 32], dropout=0.4)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    model = FNN(input_dim=X_train.shape[1], hidden_dims=[64, 32], dropout=0.4)
+
+    # Dynamic pos_weight — ekibin yontemi
+    n_neg     = (y_train == 0).sum()
+    n_pos     = (y_train == 1).sum()
+    pos_w     = torch.tensor([n_neg / n_pos], dtype=torch.float32)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
     print(f"  Architecture: {X_train.shape[1]} -> 64 (BN) -> 32 (BN) -> 1")
-    print(f"  Optimizer: Adam (lr=1e-3)")
-    print(f"  Loss: Weighted BCEWithLogitsLoss")
+    print(f"  pos_weight: {pos_w.item():.3f} (neg={n_neg}, pos={n_pos})")
+    print(f"  Optimizer: Adam (lr=1e-3, weight_decay=1e-4)")
+    print(f"  Loss: BCEWithLogitsLoss")
 
-    # === 4. TRAINING ===
-    print("\n[4/5] Training started (150 epochs)...")
-    epochs       = 150
-    best_val_auc = 0.0
-    best_state   = None
+    # === 4. TRAINING — EARLY STOPPING ===
+    print("\n[4/5] Training with early stopping (patience=10, max=100)...")
 
-    for epoch in range(epochs):
+    best_val_loss = float('inf')
+    best_state    = None
+    patience      = 10
+    counter       = 0
+    best_epoch    = 0
+
+    for epoch in range(1, 101):
         model.train()
-        epoch_loss = 0.0
-        batches    = 0
-
-        for X_batch, y_batch, w_batch in train_loader:
+        for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
-            logits        = model(X_batch)
-            loss          = (criterion(logits, y_batch) * w_batch).mean()
+            loss = criterion(model(X_batch), y_batch)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
-            batches    += 1
 
-        # Validation AUC her 10 epoch'ta
-        if epoch % 10 == 0 or epoch == epochs - 1:
-            model.eval()
-            with torch.no_grad():
-                val_proba = torch.sigmoid(model(X_val_t)).numpy().flatten()
-            val_auc = roc_auc_score(y_val, val_proba)
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(
+                model(X_val_t),
+                torch.tensor(y_val.values, dtype=torch.float32).unsqueeze(1)
+            ).item()
+            val_proba = torch.sigmoid(model(X_val_t)).numpy().flatten()
+        val_auc = roc_auc_score(y_val, val_proba)
 
-            # Best model kaydet
-            if val_auc > best_val_auc:
-                best_val_auc = val_auc
-                best_state   = {k: v.clone() for k, v in model.state_dict().items()}
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
+            best_epoch    = epoch
+            counter       = 0
+        else:
+            counter += 1
+            if counter >= patience:
+                print(f"  Early stopping at epoch {epoch} "
+                      f"| best epoch={best_epoch} "
+                      f"| best val_loss={best_val_loss:.4f} "
+                      f"| val_auc={val_auc:.4f}")
+                break
 
-            print(f"  Epoch {epoch:3d}/{epochs}: "
-                  f"Loss={epoch_loss/batches:.4f}  Val AUC={val_auc:.4f}"
-                  f"{'  *' if val_auc == best_val_auc else ''}")
-            model.train()
+        if epoch % 10 == 0:
+            print(f"  Epoch {epoch:3d} | val_loss={val_loss:.4f} "
+                  f"| val_auc={val_auc:.4f}"
+                  f"{'  *' if counter == 0 else ''}")
 
-    # Best modeli yükle
     model.load_state_dict(best_state)
-    print(f"\n  Best Val AUC: {best_val_auc:.4f}")
 
     # === 5. EVALUATION ===
     print("\n[5/5] Evaluating on test set...")
@@ -159,5 +163,4 @@ if __name__ == "__main__":
         print("\n!!! ERROR CAUGHT !!!")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {e}")
-        import traceback
         traceback.print_exc()

@@ -4,233 +4,174 @@ os.environ["OMP_NUM_THREADS"] = "1"
 
 import sys
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, os.path.abspath("."))
-from src.preprocessing.pipeline import prepare
-from src.models.fnn import FNN
+from src.models.train_utils import get_trained_fnn
 
+import torch
 import shap
 from captum.attr import IntegratedGradients
 
 
-def get_trained_model(X_train, y_train, class_weights, seed=21):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
-    y_train_t = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
-    sample_weights = torch.tensor(
-        [class_weights[int(y)] for y in y_train.values],
-        dtype=torch.float32
-    ).unsqueeze(1)
-
-    train_loader = DataLoader(
-        TensorDataset(X_train_t, y_train_t, sample_weights),
-        batch_size=32, shuffle=True
-    )
-
-    model     = FNN(input_dim=X_train.shape[1], hidden_dims=[64, 32], dropout=0.1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
-    criterion = nn.BCELoss(reduction='none')
-
-    for epoch in range(150):
-        model.train()
-        for X_batch, y_batch, w_batch in train_loader:
-            optimizer.zero_grad()
-            loss = (criterion(model(X_batch), y_batch) * w_batch).mean()
-            loss.backward()
-            optimizer.step()
-
-    model.eval()
-    return model
-
-
-def compute_faithfulness(model, inputs_t, attributions, k=5, n_perturb=50, seed=21):
-    """
-    Faithfulness: top-k feature'lari sifirla, tahmin ne kadar degisiyor?
-    Yuksek faithfulness = aciklama modelin gercek kararini yansitiyordur.
-    OpenXAI'in eval_pred_faithfulness ile ayni mantik.
-    """
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
+def compute_faithfulness(model, inputs_t, attributions, k=5):
     scores = []
     with torch.no_grad():
-        orig_preds = model(inputs_t).numpy().flatten()
+        orig_preds = torch.sigmoid(model(inputs_t)).numpy().flatten()
 
     for i in range(len(inputs_t)):
-        attr    = attributions[i]
-        inp     = inputs_t[i].clone()
-
-        # Top-k en onemli feature'larin indekslerini bul
-        topk_idx = np.argsort(np.abs(attr))[::-1][:k].copy()
-
-        # Bu feature'lari sifirla (perturb)
-        perturbed = inp.clone()
+        topk_idx  = np.argsort(np.abs(attributions[i]))[::-1][:k].copy()
+        perturbed = inputs_t[i].clone()
         perturbed[topk_idx] = 0.0
-
         with torch.no_grad():
-            perturbed_pred = model(perturbed.unsqueeze(0)).item()
-
-        # Tahmin farkini kaydet
-        scores.append(abs(orig_preds[i] - perturbed_pred))
+            pert_pred = torch.sigmoid(model(perturbed.unsqueeze(0))).item()
+        scores.append(abs(orig_preds[i] - pert_pred))
 
     return np.array(scores)
 
 
-def compute_stability(model, inputs_t, attributions, n_neighbors=10,
-                      noise_std=0.05, seed=21):
+def get_input_gradient(model, x_np):
+    """Input gradient of sigmoid(model(x)) w.r.t. x."""
+    x_t = torch.tensor(x_np, dtype=torch.float32).unsqueeze(0)
+    x_t.requires_grad_(True)
+    out   = torch.sigmoid(model(x_t)).squeeze()
+    grads = torch.autograd.grad(out, x_t)[0]
+    return grads.detach().numpy().flatten()
+
+
+def compute_ris(model, inputs_t, n_neighbors=5, noise_std=0.01, seed=42):
     """
-    Stability (Relative Input Stability):
-    Benzer inputlar benzer aciklamalar aliyor mu?
-    Dusuk deger = stabil (aciklamalar cok degismiyordur).
+    Relative Input Stability — ekibin implementasyonu.
+    RIS = 1 - mean( ||grad(x) - grad(x')|| / ||grad(x)|| )
+    Yuksek = stabil (hedef > 0.80).
     """
     np.random.seed(seed)
-    torch.manual_seed(seed)
+    X_np  = inputs_t.numpy()
+    diffs = []
 
-    scores = []
-
-    for i in range(len(inputs_t)):
-        inp  = inputs_t[i].clone().numpy()
-        attr = attributions[i]
-
-        # Kucuk gaussian gurultu ekleyerek komsular uret
-        neighbor_stabilities = []
-
+    for i in range(len(X_np)):
+        orig_attr      = get_input_gradient(model, X_np[i])
+        neighbor_diffs = []
         for _ in range(n_neighbors):
-            noise    = np.random.normal(0, noise_std, size=inp.shape).astype(np.float32)
-            neighbor = np.clip(inp + noise, 0, 1)
-            neighbor_t = torch.tensor(neighbor).unsqueeze(0)
+            noisy      = np.clip(
+                X_np[i] + np.random.normal(0, noise_std, X_np[i].shape),
+                0, 1).astype(np.float32)
+            neigh_attr = get_input_gradient(model, noisy)
+            denom      = np.linalg.norm(orig_attr) + 1e-8
+            neighbor_diffs.append(
+                np.linalg.norm(orig_attr - neigh_attr) / denom
+            )
+        diffs.append(np.mean(neighbor_diffs))
 
-            # Komsu icin SHAP/IG hesapla — yaklasim olarak gradyani kullan
-            neighbor_t.requires_grad_(True)
-            pred = model(neighbor_t)
-            pred.backward()
-            neighbor_attr = neighbor_t.grad.squeeze().detach().numpy()
-            neighbor_t.requires_grad_(False)
-
-            # Aciklama farki
-            attr_diff = np.linalg.norm(attr - neighbor_attr)
-            inp_diff  = np.linalg.norm(inp - neighbor)
-
-            if inp_diff > 1e-8:
-                neighbor_stabilities.append(attr_diff / inp_diff)
-
-        if neighbor_stabilities:
-            scores.append(np.mean(neighbor_stabilities))
-
-    return np.array(scores)
+    ris_score = max(0.0, 1.0 - np.mean(diffs))
+    return ris_score, np.std(diffs)
 
 
 def run_metrics():
     print("=" * 60)
-    print("XAI METRICS -- FNN on German Credit")
-    print("(OpenXAI-inspired: Faithfulness, Stability, Consistency)")
+    print("XAI METRICS -- FNN on German Credit (UCI)")
+    print("Faithfulness | Stability (RIS) | Consistency")
     print("=" * 60)
 
-    # === 1. VERİ VE MODEL ===
-    print("\n[1/4] Preparing data and training model...")
-    SEED = 21
-    X_train, X_test, y_train, y_test, class_weights = prepare(
-        "german_credit", "fnn", random_state=SEED
-    )
-    model = get_trained_model(X_train, y_train, class_weights, seed=SEED)
-    print("  Model trained (seed=21).")
+    print("\n[1/4] Training model...")
+    SEED = 42
+    model, X_train, X_test, y_train, y_test, X_train_t, X_test_t = \
+        get_trained_fnn("german_credit", seed=SEED)
 
-    X_test_t  = torch.tensor(X_test.values,  dtype=torch.float32)
-    X_train_t = torch.tensor(X_train.values, dtype=torch.float32)
-
-    # Ilk 100 test ornegi uzerinde degerlendir
     n_eval   = 100
     X_eval_t = X_test_t[:n_eval]
 
-    # === 2. ATTRIBUTION'LARI HESAPLA ===
     print("\n[2/4] Computing SHAP and IG attributions...")
-
-    # SHAP
-    background     = X_train_t[:100]
-    shap_explainer = shap.DeepExplainer(model, background)
-    shap_vals      = shap_explainer.shap_values(X_eval_t)
+    torch.manual_seed(SEED)
+    bg_idx   = torch.randperm(len(X_train_t))[:100]
+    bg_data  = X_train_t[bg_idx]
+    shap_exp  = shap.GradientExplainer(model, bg_data)
+    shap_vals = shap_exp.shap_values(X_eval_t)
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[0]
-    if shap_vals.ndim == 3:
+    if hasattr(shap_vals, 'ndim') and shap_vals.ndim == 3:
         shap_vals = shap_vals[:, :, 0]
-    print(f"  SHAP attributions shape: {shap_vals.shape}")
+    print(f"  SHAP shape: {shap_vals.shape}")
 
-    # IG
     ig       = IntegratedGradients(model)
     baseline = torch.zeros_like(X_eval_t)
-    ig_vals  = ig.attribute(X_eval_t, baselines=baseline,
-                             target=0, n_steps=50).detach().numpy()
-    print(f"  IG attributions shape:   {ig_vals.shape}")
+    ig_list  = []
+    for i in range(0, n_eval, 50):
+        attrs = ig.attribute(X_eval_t[i:i+50],
+                             baselines=baseline[i:i+50],
+                             target=0, n_steps=50)
+        ig_list.append(attrs.detach())
+    ig_vals = torch.cat(ig_list, dim=0).numpy()
+    print(f"  IG shape:   {ig_vals.shape}")
 
-    # === 3. FAITHFULNESS ===
-    print("\n[3/4] Computing Faithfulness (top-5 feature perturbation)...")
+    print("\n[3/4] Computing Faithfulness (k=5, k=10)...")
+    for k in [5, 10]:
+        f_shap = compute_faithfulness(model, X_eval_t, shap_vals, k=k)
+        f_ig   = compute_faithfulness(model, X_eval_t, ig_vals,   k=k)
+        print(f"  K={k} | SHAP: {np.mean(f_shap):.4f} +/- {np.std(f_shap):.4f}"
+              f" | IG: {np.mean(f_ig):.4f} +/- {np.std(f_ig):.4f}")
 
     faith_shap = compute_faithfulness(model, X_eval_t, shap_vals, k=5)
     faith_ig   = compute_faithfulness(model, X_eval_t, ig_vals,   k=5)
 
-    print(f"  Faithfulness (SHAP): {np.mean(faith_shap):.4f} "
-          f"(mean prediction drop when top-5 features zeroed)")
-    print(f"  Faithfulness (IG):   {np.mean(faith_ig):.4f}")
+    print("\n[4/4] Computing Stability (RIS)...")
+    ris_score, ris_std = compute_ris(model, X_eval_t,
+                                      n_neighbors=5, noise_std=0.01, seed=SEED)
+    print(f"  RIS: {ris_score:.4f} +/- {ris_std:.4f}  (target > 0.80)")
 
-    # === 4. STABILITY ===
-    print("\n[4/4] Computing Stability (relative input stability)...")
-
-    stab_shap = compute_stability(model, X_eval_t, shap_vals,
-                                   n_neighbors=10, noise_std=0.05)
-    stab_ig   = compute_stability(model, X_eval_t, ig_vals,
-                                   n_neighbors=10, noise_std=0.05)
-
-    print(f"  Stability (SHAP): {np.mean(stab_shap):.4f} "
-          f"(lower = more stable explanations)")
-    print(f"  Stability (IG):   {np.mean(stab_ig):.4f}")
-
-    # === CONSISTENCY ===
-    print("\n--- Consistency: SHAP vs IG Top-5 Feature Agreement ---")
+    print("\n--- Consistency: SHAP vs IG Top-K Agreement ---")
     feat_names = X_train.columns.tolist()
-    shap_mean  = np.abs(shap_vals).mean(axis=0)
-    ig_mean    = np.abs(ig_vals).mean(axis=0)
-    shap_top5  = set(np.argsort(shap_mean)[::-1][:5])
-    ig_top5    = set(np.argsort(ig_mean)[::-1][:5])
-    overlap    = len(shap_top5 & ig_top5)
-    consistency = overlap / 5
 
-    print(f"  SHAP Top-5: {[feat_names[i] for i in sorted(shap_top5, key=lambda x: shap_mean[x], reverse=True)]}")
-    print(f"  IG Top-5:   {[feat_names[i] for i in sorted(ig_top5, key=lambda x: ig_mean[x], reverse=True)]}")
-    print(f"  Overlap: {overlap}/5 features")
-    print(f"  Consistency Score: {consistency:.2f}")
+    for k in [5, 10]:
+        fa_scores  = []
+        sra_scores = []
+        for s, g in zip(shap_vals, ig_vals):
+            # Feature Agreement
+            top_s = set(np.argsort(np.abs(s))[-k:])
+            top_g = set(np.argsort(np.abs(g))[-k:])
+            fa_scores.append(len(top_s & top_g) / k)
 
-    # === ÖZET ===
+            # Signed Rank Agreement — hem sira hem isaret
+            rank_s = np.argsort(np.abs(s))[-k:][::-1]
+            rank_g = np.argsort(np.abs(g))[-k:][::-1]
+            sign_s = np.sign(s[rank_s])
+            sign_g = np.sign(g[rank_g])
+            match  = sum(
+                1 for i, feat in enumerate(rank_s)
+                if feat in rank_g and
+                sign_s[i] == sign_g[list(rank_g).index(feat)]
+            )
+            sra_scores.append(match / k)
+
+        print(f"  K={k} | FA: {np.mean(fa_scores):.3f} +/- {np.std(fa_scores):.3f}"
+              f" | SRA: {np.mean(sra_scores):.3f} +/- {np.std(sra_scores):.3f}")
+
+    shap_mean = np.abs(shap_vals).mean(axis=0)
+    ig_mean   = np.abs(ig_vals).mean(axis=0)
+    shap_top5 = set(np.argsort(shap_mean)[::-1][:5])
+    ig_top5   = set(np.argsort(ig_mean)[::-1][:5])
+    overlap   = len(shap_top5 & ig_top5)
+
+    print(f"\n  Global Top-5 overlap: {overlap}/5")
+    print(f"  SHAP: {[feat_names[i] for i in sorted(shap_top5, key=lambda x: shap_mean[x], reverse=True)]}")
+    print(f"  IG:   {[feat_names[i] for i in sorted(ig_top5, key=lambda x: ig_mean[x], reverse=True)]}")
+
     print("\n" + "=" * 60)
     print("METRICS SUMMARY")
     print("=" * 60)
-    print(f"  Faithfulness (SHAP): {np.mean(faith_shap):.4f}")
-    print(f"  Faithfulness (IG):   {np.mean(faith_ig):.4f}")
-    print(f"  Stability    (SHAP): {np.mean(stab_shap):.4f}  (lower = better)")
-    print(f"  Stability    (IG):   {np.mean(stab_ig):.4f}  (lower = better)")
-    print(f"  Consistency  Score:  {consistency:.2f}  ({overlap}/5 features match)")
+    print(f"  Faithfulness K=5  | SHAP: {np.mean(faith_shap):.4f}"
+          f"  | IG: {np.mean(faith_ig):.4f}")
+    print(f"  Stability RIS     | {ris_score:.4f} +/- {ris_std:.4f}"
+          f"  (higher = more stable, target > 0.80)")
+    print(f"  Consistency K=5   | Global overlap: {overlap}/5")
     print("=" * 60)
-
-    return {
-        "faithfulness_shap": float(np.mean(faith_shap)),
-        "faithfulness_ig":   float(np.mean(faith_ig)),
-        "stability_shap":    float(np.mean(stab_shap)),
-        "stability_ig":      float(np.mean(stab_ig)),
-        "consistency":       consistency
-    }
 
 
 if __name__ == "__main__":
     import traceback
     try:
-        results = run_metrics()
+        run_metrics()
     except BaseException as e:
         print("\n!!! ERROR CAUGHT !!!")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {e}")
-        print("\nFull traceback:")
         traceback.print_exc()

@@ -29,35 +29,48 @@ def run_ig_explanation(save_plots=True):
 
     # === 2. IG EXPLAINER ===
     print("\n[2/4] Setting up Integrated Gradients...")
-    ig       = IntegratedGradients(model)
+    ig = IntegratedGradients(model)
     print("  IntegratedGradients ready (zero baseline, 50 steps).")
 
     # === 3. IG ATTRIBUTION ===
     print("\n[3/4] Computing IG attributions...")
-    N_IG     = min(200, len(X_test_t))
-    X_ig     = X_test_t[:N_IG]
-    baseline = torch.zeros_like(X_ig)
+    N_IG      = min(200, len(X_test_t))
+    X_ig      = X_test_t[:N_IG]
+    baseline  = torch.zeros_like(X_ig)
 
-    batch_size = 50
-    ig_list    = []
+    batch_size    = 50
+    ig_list       = []
+    delta_list    = []
+
     for i in range(0, N_IG, batch_size):
-        batch    = X_ig[i:i+batch_size]
-        base_b   = baseline[i:i+batch_size]
-        attrs    = ig.attribute(batch, baselines=base_b,
-                                target=0, n_steps=50)
+        batch   = X_ig[i:i+batch_size]
+        base_b  = baseline[i:i+batch_size]
+        attrs, delta = ig.attribute(
+            batch,
+            baselines=base_b,
+            target=0,
+            n_steps=50,
+            return_convergence_delta=True
+        )
         ig_list.append(attrs.detach())
+        delta_list.append(delta.detach())
 
-    ig_attrs  = torch.cat(ig_list, dim=0).numpy()
+    ig_attrs       = torch.cat(ig_list,    dim=0).numpy()
+    all_deltas     = torch.cat(delta_list, dim=0)
+    mean_delta     = all_deltas.abs().mean().item()
+
     print(f"  IG attributions shape: {ig_attrs.shape}")
+    print(f"  Mean convergence delta: {mean_delta:.6f} "
+          f"(closer to 0 = better approximation)")
 
     os.makedirs("reports/figures", exist_ok=True)
 
     # === 4. GORSELLER ===
     print("\n[4/4] Generating IG plots...")
 
-    # Global bar
-    mean_abs     = np.abs(ig_attrs).mean(axis=0)
-    sorted_idx   = np.argsort(mean_abs)[::-1]
+    # Global bar — top 20
+    mean_abs   = np.abs(ig_attrs).mean(axis=0)
+    sorted_idx = np.argsort(mean_abs)[::-1]
 
     plt.figure(figsize=(10, 8))
     plt.barh(
@@ -96,10 +109,10 @@ def run_ig_explanation(save_plots=True):
         if save_plots:
             plt.savefig("reports/figures/ig_local_bar.png",
                         dpi=150, bbox_inches="tight")
-            print("  Saved: reports/figures/ig_local_bar.png")
+            print(f"  Saved: reports/figures/ig_local_bar.png")
         plt.close()
 
-    # Top-5 ozet + SHAP karsilastirma
+    # Top-5 ozet
     top5_idx = sorted_idx[:5]
     print("\n  IG Top-5 features:")
     for i, idx in enumerate(top5_idx):

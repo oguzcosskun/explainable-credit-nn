@@ -40,44 +40,63 @@ def get_trained_fnn(dataset="german_credit", seed=SEED):
     X_val_t   = torch.tensor(X_val.values,   dtype=torch.float32)
     X_test_t  = torch.tensor(X_test.values,  dtype=torch.float32)
 
-    sample_weights = torch.tensor(
-        [class_weights[int(y)] for y in y_train.values],
-        dtype=torch.float32
-    ).unsqueeze(1)
+    # Dynamic pos_weight — ekibin yontemi
+    n_neg   = (y_train == 0).sum()
+    n_pos   = (y_train == 1).sum()
+    pos_w   = torch.tensor([n_neg / n_pos], dtype=torch.float32)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_w)
 
     train_loader = DataLoader(
-        TensorDataset(X_train_t, y_train_t, sample_weights),
+        TensorDataset(X_train_t, y_train_t),
         batch_size=32, shuffle=True
     )
 
     model     = FNN(input_dim=X_train.shape[1], hidden_dims=[64, 32], dropout=0.4)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
-    best_val_auc = 0.0
-    best_state   = None
+    # Early stopping — ekibin yontemi
+    best_val_loss = float('inf')
+    best_state    = None
+    patience      = 10
+    counter       = 0
+    max_epochs    = 100
 
-    for epoch in range(150):
+    for epoch in range(1, max_epochs + 1):
         model.train()
-        for X_batch, y_batch, w_batch in train_loader:
+        for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
-            loss = (criterion(model(X_batch), y_batch) * w_batch).mean()
+            loss = criterion(model(X_batch), y_batch)
             loss.backward()
             optimizer.step()
 
-        if epoch % 10 == 0 or epoch == 149:
-            model.eval()
-            with torch.no_grad():
-                val_proba = torch.sigmoid(model(X_val_t)).numpy().flatten()
-            val_auc = roc_auc_score(y_val, val_proba)
-            if val_auc > best_val_auc:
-                best_val_auc = val_auc
-                best_state   = {k: v.clone() for k, v in model.state_dict().items()}
-            model.train()
+        model.eval()
+        with torch.no_grad():
+            val_loss = criterion(
+                model(X_val_t),
+                torch.tensor(y_val.values, dtype=torch.float32).unsqueeze(1)
+            ).item()
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
+            counter       = 0
+        else:
+            counter += 1
+            if counter >= patience:
+                print(f"  Early stopping at epoch {epoch} "
+                      f"(best val_loss={best_val_loss:.4f})")
+                break
 
     model.load_state_dict(best_state)
     model.eval()
-    print(f"  Model trained | best_val_auc={best_val_auc:.4f} | "
+
+    # Val AUC
+    with torch.no_grad():
+        val_proba = torch.sigmoid(model(X_val_t)).numpy().flatten()
+    val_auc = roc_auc_score(y_val, val_proba)
+
+    print(f"  Model trained | val_auc={val_auc:.4f} | "
+          f"val_loss={best_val_loss:.4f} | "
           f"features={X_train.shape[1]} | seed={seed}")
 
     return model, X_train, X_test, y_train, y_test, X_train_t, X_test_t
