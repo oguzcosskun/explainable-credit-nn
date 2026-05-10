@@ -23,7 +23,6 @@ def run_dice_explanation(n_counterfactuals=3):
     print("DiCE COUNTERFACTUALS -- FNN on German Credit")
     print("=" * 60)
 
-    # === 1. MODELİ EĞİT ===
     print("\n[1/3] Training FNN model...")
     SEED = 21
     torch.manual_seed(SEED)
@@ -60,7 +59,6 @@ def run_dice_explanation(n_counterfactuals=3):
     model.eval()
     print("  Model trained (seed=21).")
 
-    # === 2. DiCE ICIN HAM VERIYI HAZIRLA ===
     print("\n[2/3] Preparing raw data for DiCE...")
 
     df = pd.read_csv("data/raw/german_credit_data.csv")
@@ -118,7 +116,6 @@ def run_dice_explanation(n_counterfactuals=3):
     exp = Dice(d, m, method="random")
     print("  DiCE explainer ready.")
 
-    # === 3. COUNTERFACTUAL URET ===
     print("\n[3/3] Generating counterfactuals...")
 
     _, df_test = train_test_split(
@@ -136,8 +133,7 @@ def run_dice_explanation(n_counterfactuals=3):
         instance = bad_test.iloc[[i]][feature_cols]
         prob     = wrapper.predict_proba(instance)[0][1]
 
-        # Gercek degerlere cevir
-        inv = scaler.inverse_transform(instance[numeric_cols].values)[0]
+        inv         = scaler.inverse_transform(instance[numeric_cols].values)[0]
         age_real    = int(inv[numeric_cols.index("Age")])
         dur_real    = int(inv[numeric_cols.index("Duration")])
         credit_real = int(inv[numeric_cols.index("Credit amount")])
@@ -168,26 +164,29 @@ def run_dice_explanation(n_counterfactuals=3):
                         new_val  = row[feat]
                         if str(orig_val) != str(new_val):
                             if feat in numeric_cols:
-                                idx_n = numeric_cols.index(feat)
+                                idx_n         = numeric_cols.index(feat)
                                 d_orig        = np.zeros(len(numeric_cols))
                                 d_new         = np.zeros(len(numeric_cols))
                                 d_orig[idx_n] = float(orig_val)
                                 d_new[idx_n]  = float(new_val)
                                 real_orig = scaler.inverse_transform([d_orig])[0][idx_n]
                                 real_new  = scaler.inverse_transform([d_new])[0][idx_n]
-                                changes.append(
-                                    f"{feat}: {real_orig:.0f} -> {real_new:.0f}"
-                                )
+                                # Cok kucuk degisiklikleri atla (< 1 birim)
+                                if abs(real_orig - real_new) >= 1:
+                                    changes.append(
+                                        f"{feat}: {real_orig:.0f} -> {real_new:.0f}"
+                                    )
                             else:
-                                changes.append(
-                                    f"{feat}: {orig_val} -> {new_val}"
-                                )
+                                # Kategorik: sadece gercekten degismisse ekle
+                                if str(orig_val).strip() != str(new_val).strip():
+                                    changes.append(
+                                        f"{feat}: {orig_val} -> {new_val}"
+                                    )
+
                     if changes:
                         print(f"\n    Scenario {j+1}:")
                         for c in changes:
                             print(f"      {c}")
-                    else:
-                        print(f"\n    Scenario {j+1}: No changes needed.")
             else:
                 print("    No valid counterfactuals found.")
 
