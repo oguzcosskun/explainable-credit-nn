@@ -108,9 +108,14 @@ def run_metrics(dataset="german_credit"):
 
     # === 4. STABILITY ===
     print("\n[4/4] Computing Stability (RIS)...")
+# Feature sayisina gore noise_std ayarla
+    n_features = X_eval_t.shape[1]
+    noise_std  = 0.01 if n_features >= 20 else 0.001
+
     ris_score, ris_std = compute_ris(model, X_eval_t,
-                                      n_neighbors=5, noise_std=0.01, seed=SEED)
-    print(f"  RIS: {ris_score:.4f} +/- {ris_std:.4f}  (target > 0.80)")
+                                      n_neighbors=5, noise_std=noise_std, seed=SEED)
+    print(f"  RIS: {ris_score:.4f} +/- {ris_std:.4f}  (target > 0.80)"
+          f"  [noise_std={noise_std}, features={n_features}]")
 
     # === CONSISTENCY ===
     print("\n--- Consistency: SHAP vs IG ---")
