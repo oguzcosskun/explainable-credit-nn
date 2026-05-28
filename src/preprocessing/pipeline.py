@@ -8,20 +8,36 @@ def prepare(dataset_name="german_credit", model_family="fnn",
             test_size=0.2, random_state=42):
     """
     Unified preprocessing pipeline.
-    dataset_name : "german_credit"
+    dataset_name : "german_credit", "heloc", "adult", "gmsc"
     model_family : "fnn" (one-hot) | "tabnet" (label encoding)
     Returns: X_train, X_test, y_train, y_test, class_weights
     """
 
-    if dataset_name == "german_credit":
-        X, y = _load_german()
-    else:
-        raise ValueError(f"Dataset '{dataset_name}' not supported yet.")
+    loaders = {
+        "german_credit": _load_german,
+        "heloc":         _load_heloc,
+        "adult":         _load_adult,
+        "gmsc":          _load_gmsc,
+    }
 
-    # === ENCODING ===
+    if dataset_name not in loaders:
+        raise ValueError(f"Unknown dataset '{dataset_name}'. "
+                         f"Choose from: {list(loaders.keys())}")
+
+    X, y = loaders[dataset_name]()
+
+    # === MISSING VALUE IMPUTATION ===
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
 
+    for col in num_cols:
+        if X[col].isnull().any():
+            X[col] = X[col].fillna(X[col].median())
+    for col in cat_cols:
+        if X[col].isnull().any():
+            X[col] = X[col].fillna(X[col].mode()[0])
+
+    # === ENCODING ===
     if model_family == "fnn":
         X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
     elif model_family == "tabnet":
@@ -58,14 +74,8 @@ def prepare(dataset_name="german_credit", model_family="fnn",
 
 
 def _load_german():
-    """
-    Orijinal UCI German Credit dataset.
-    URL: archive.ics.uci.edu — ham .data dosyası, sütun adı yok.
-    20 feature, binary target (1=good→0, 2=bad→1).
-    """
     url = ("https://archive.ics.uci.edu/ml/machine-learning-databases"
            "/statlog/german/german.data")
-
     col_names = [
         "checking_account", "duration", "credit_history", "purpose",
         "credit_amount", "savings_account", "employment",
@@ -74,40 +84,95 @@ def _load_german():
         "housing", "existing_credits", "job", "dependents",
         "telephone", "foreign_worker", "target"
     ]
-
     df = pd.read_csv(url, sep=" ", header=None, names=col_names)
-
-    # Target: 1=good → 0, 2=bad → 1
     df["target"] = df["target"].map({1: 0, 2: 1})
-
-    # Kategorik sütunlar — UCI'da A11, A12 gibi kodlar var, anlamlı isimlere çevir
+    X = df.drop(columns=["target"])
+    y = df["target"]
+    print(f"[German Credit UCI] shape={df.shape}, "
+          f"default_rate={y.mean()*100:.2f}%")
     cat_cols = [
         "checking_account", "credit_history", "purpose",
         "savings_account", "employment", "personal_status",
         "other_debtors", "property", "other_installments",
         "housing", "job", "telephone", "foreign_worker"
     ]
-
-    X = df.drop(columns=["target"])
-    y = df["target"]
-
-    print(f"[German Credit UCI] shape={df.shape}, "
-          f"default_rate={y.mean()*100:.2f}%")
-    print(f"  Categorical cols ({len(cat_cols)}): {cat_cols}")
     num_cols = [c for c in X.columns if c not in cat_cols]
+    print(f"  Categorical cols ({len(cat_cols)}): {cat_cols}")
     print(f"  Numerical   cols ({len(num_cols)}): {num_cols}")
+    return X, y
 
+
+def _load_heloc():
+    """
+    HELOC (Home Equity Line of Credit) dataset.
+    Target: 1 = Bad (RiskPerformance == Bad), 0 = Good
+    Sentinel values -7, -8, -9 treated as missing.
+    """
+    path = "data/raw/heloc_dataset_v1.csv"
+    print("[HELOC] Loading from local file...")
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    df["target"] = (df["RiskPerformance"].str.strip() == "Bad").astype(int)
+    X = df.drop(columns=["RiskPerformance", "target"])
+    X = X.replace([-7, -8, -9], np.nan)
+    y = df["target"]
+    print(f"[HELOC] shape={df.shape}, default_rate={y.mean()*100:.2f}%")
+    return X, y
+
+
+def _load_adult():
+    """
+    UCI Adult Income dataset.
+    Target: 1 = >50K, 0 = <=50K
+    """
+    url = ("https://archive.ics.uci.edu/ml/machine-learning-databases"
+           "/adult/adult.data")
+    col_names = [
+        "age", "workclass", "fnlwgt", "education", "education_num",
+        "marital_status", "occupation", "relationship", "race", "sex",
+        "capital_gain", "capital_loss", "hours_per_week",
+        "native_country", "income"
+    ]
+    print("[Adult Income] Loading from UCI...")
+    df = pd.read_csv(url, header=None, names=col_names,
+                     na_values=" ?", skipinitialspace=True)
+    df["target"] = (df["income"].str.strip().str.startswith(">50K")).astype(int)
+    X = df.drop(columns=["income", "target"])
+    y = df["target"]
+    print(f"[Adult Income] shape={df.shape}, default_rate={y.mean()*100:.2f}%")
+    return X, y
+
+
+def _load_gmsc():
+    """
+    Give Me Some Credit dataset.
+    Target: 1 = SeriousDlqin2yrs (default)
+    Sentinel values 96, 98 in NumberOfTime columns treated as missing.
+    """
+    path = "data/raw/cs-training.csv"
+    print("[GMSC] Loading from local file...")
+    df = pd.read_csv(path, index_col=0)
+    df.columns = [c.strip() for c in df.columns]
+    y = df["SeriousDlqin2yrs"].astype(int)
+    X = df.drop(columns=["SeriousDlqin2yrs"])
+    for col in [c for c in X.columns if "NumberOfTime" in c]:
+        X[col] = X[col].replace([96, 98], np.nan)
+    print(f"[GMSC] shape={df.shape}, default_rate={y.mean()*100:.2f}%")
     return X, y
 
 
 # === TEST ===
 if __name__ == "__main__":
-    X_train, X_test, y_train, y_test, weights = prepare(
-        "german_credit", "fnn"
-    )
-    print(f"\nX_train shape: {X_train.shape}")
-    print(f"X_test  shape: {X_test.shape}")
-    print(f"y_train dist:\n{y_train.value_counts()}")
-    print(f"Class weights: {weights}")
-    print(f"\nFeatures ({X_train.shape[1]}):")
-    print(X_train.columns.tolist())
+    for dataset in ["german_credit", "heloc", "adult", "gmsc"]:
+        print(f"\n{'='*50}")
+        print(f"Testing: {dataset.upper()}")
+        print(f"{'='*50}")
+        try:
+            X_train, X_test, y_train, y_test, weights = prepare(
+                dataset, "fnn"
+            )
+            print(f"X_train: {X_train.shape}, X_test: {X_test.shape}")
+            print(f"Class weights: {weights}")
+            print(f"OK ✓")
+        except Exception as e:
+            print(f"ERROR: {e}")
