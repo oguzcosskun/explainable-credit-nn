@@ -16,7 +16,6 @@ import torch
 import dice_ml
 from dice_ml import Dice
 
-# UCI German Credit kod -> anlamli isim
 UCI_LABELS = {
     "A11": "< 0 DM", "A12": "0-200 DM", "A13": "> 200 DM",
     "A14": "no checking account",
@@ -48,9 +47,15 @@ def decode(val):
     return UCI_LABELS.get(str(val), str(val))
 
 
-def _get_dataset_config(dataset):
-    """Her dataset icin ham veri yukleyici ve immutable feature listesi."""
+def _align_columns(df, reference_columns):
+    """Reference column listesiyle uyumlu hale getir, eksikleri 0 yap."""
+    missing = {col: 0.0 for col in reference_columns if col not in df.columns}
+    if missing:
+        df = pd.concat([df, pd.DataFrame(missing, index=df.index)], axis=1)
+    return df[reference_columns].astype(float)
 
+
+def _get_dataset_config(dataset):
     if dataset == "german_credit":
         url = ("https://archive.ics.uci.edu/ml/machine-learning-databases"
                "/statlog/german/german.data")
@@ -129,18 +134,16 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
     print(f"DiCE COUNTERFACTUALS -- FNN on {dataset.upper()}")
     print("=" * 60)
 
-    # === 1. MODEL ===
-    print("\n[1/3] Loading model...")
     SEED = 42
+    print("\n[1/3] Loading model...")
     model, X_train, X_test, y_train, y_test, X_train_t, X_test_t = \
         get_trained_fnn(dataset, seed=SEED)
-    print(f"  Features: {len(X_train.columns)}")
+    ref_cols = X_train.columns.tolist()
+    print(f"  Features: {len(ref_cols)}")
 
-    # === 2. DiCE SETUP ===
     print("\n[2/3] Preparing data for DiCE...")
     df, cat_cols, num_cols, immutable = _get_dataset_config(dataset)
 
-    # Numerik sutunlari normalize et
     scaler = MinMaxScaler()
     df[num_cols] = scaler.fit_transform(df[num_cols])
     raw_feature_cols = [c for c in df.columns if c != "target"]
@@ -155,10 +158,7 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
                 X_enc = pd.get_dummies(X, columns=cat_cols, drop_first=False)
             else:
                 X_enc = X.copy()
-            for col in X_train.columns:
-                if col not in X_enc.columns:
-                    X_enc[col] = 0.0
-            X_enc = X_enc[X_train.columns].astype(float)
+            X_enc = _align_columns(X_enc, ref_cols)
             X_t   = torch.tensor(X_enc.values, dtype=torch.float32)
             with torch.no_grad():
                 proba_bad = torch.sigmoid(model(X_t)).numpy().flatten()
@@ -181,9 +181,7 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
 
     vary_features = [f for f in raw_feature_cols if f not in immutable]
 
-    # === 3. VALIDITY + PROXIMITY ===
     print(f"\n[3/3] Computing Validity & Proximity on {n_eval} applicants...")
-
     validity_scores  = []
     proximity_scores = []
     N_eval = min(n_eval, len(bad_test))
@@ -199,23 +197,16 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
             if cf_df is not None and len(cf_df) > 0:
                 validity_scores.append(1)
                 if cat_cols:
-                    orig_enc = pd.get_dummies(
-                        query[raw_feature_cols], columns=cat_cols,
-                        drop_first=False)
-                    cf_enc = pd.get_dummies(
-                        cf_df[raw_feature_cols], columns=cat_cols,
-                        drop_first=False)
+                    q_enc  = pd.get_dummies(query[raw_feature_cols],
+                                            columns=cat_cols, drop_first=False)
+                    cf_enc = pd.get_dummies(cf_df[raw_feature_cols],
+                                            columns=cat_cols, drop_first=False)
                 else:
-                    orig_enc = query[raw_feature_cols].copy()
-                    cf_enc   = cf_df[raw_feature_cols].copy()
-                for col in X_train.columns:
-                    if col not in orig_enc.columns:
-                        orig_enc[col] = 0.0
-                    if col not in cf_enc.columns:
-                        cf_enc[col] = 0.0
-                orig_enc = orig_enc[X_train.columns].astype(float).values
-                cf_enc   = cf_enc[X_train.columns].astype(float).values
-                dist = np.abs(cf_enc - orig_enc).mean(axis=1).mean()
+                    q_enc  = query[raw_feature_cols].copy()
+                    cf_enc = cf_df[raw_feature_cols].copy()
+                q_enc  = _align_columns(q_enc,  ref_cols)
+                cf_enc = _align_columns(cf_enc, ref_cols)
+                dist = np.abs(cf_enc.values - q_enc.values).mean(axis=1).mean()
                 proximity_scores.append(dist)
             else:
                 validity_scores.append(0)
@@ -231,7 +222,6 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
     print(f"\n  Validity  : {val_rate:.2%} ({sum(validity_scores)}/{N_eval})")
     print(f"  Proximity : {prox_mean:.4f}")
 
-    # === ORNEKLER (ilk 3) ===
     print(f"\n--- Example Counterfactuals (first 3) ---")
     for i in range(min(3, len(bad_test))):
         instance = bad_test.iloc[[i]][raw_feature_cols]
@@ -290,7 +280,6 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
         except Exception as e:
             print(f"    Error: {e}")
 
-    # === OZET ===
     print("\n" + "=" * 60)
     print("DiCE SUMMARY")
     print("=" * 60)
@@ -302,12 +291,11 @@ def run_dice_explanation(dataset="german_credit", n_counterfactuals=3,
     print(f"  Method:     Random sampling")
     print("=" * 60)
 
-    # CSV kaydet
     os.makedirs("reports", exist_ok=True)
     row = {
         "dataset":   dataset,
         "validity":  round(val_rate, 4),
-        "proximity": round(prox_mean, 4),
+        "proximity": round(prox_mean, 4) if not np.isnan(prox_mean) else None,
         "n_eval":    N_eval,
     }
     csv_path = "reports/dice_results.csv"
