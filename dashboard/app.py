@@ -99,6 +99,16 @@ if page == "📊 Model Performance":
             st.subheader("OpenXAI Evaluation Metrics")
             df_xai = pd.read_csv(xai_path)
             st.dataframe(df_xai, use_container_width=True)
+            # Fairness Audit sonuclari
+        fairness_path = "reports/fairness_audit.csv"
+        if os.path.exists(fairness_path):
+            st.subheader("Fairness Audit — Demographic Group Analysis")
+            df_fair = pd.read_csv(fairness_path)
+            st.dataframe(df_fair, use_container_width=True)
+            st.caption(
+                "RIS and DiCE Proximity computed separately for demographic "
+                "subgroups. Similar values across groups indicate fair behavior."
+            )
 
     else:
         st.warning("Benchmark CSV not found. Run `train_all_datasets.py` first.")
