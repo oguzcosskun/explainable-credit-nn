@@ -52,7 +52,7 @@ def get_trained_tabnet(dataset="german_credit", seed=SEED,
 
     model = TabNetClassifier(
     n_d=32, n_a=32,
-    n_steps=5,
+    n_steps=3,
     gamma=1.5,
     n_independent=2,
     n_shared=2,
@@ -78,7 +78,7 @@ def get_trained_tabnet(dataset="german_credit", seed=SEED,
         eval_metric=["auc"],
         max_epochs=100,
         patience=10,
-        batch_size=64,
+        batch_size=32,
         virtual_batch_size=32,
         weights=1,
     )

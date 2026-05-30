@@ -26,38 +26,50 @@ def prepare(dataset_name="german_credit", model_family="fnn",
 
     X, y = loaders[dataset_name]()
 
-    # === MISSING VALUE IMPUTATION ===
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
 
-    for col in num_cols:
-        if X[col].isnull().any():
-            X[col] = X[col].fillna(X[col].median())
-    for col in cat_cols:
-        if X[col].isnull().any():
-            X[col] = X[col].fillna(X[col].mode()[0])
-
-    # === ENCODING ===
-    if model_family == "fnn":
-        X = pd.get_dummies(X, columns=cat_cols, drop_first=False)
-    elif model_family == "tabnet":
-        le = LabelEncoder()
-        for col in cat_cols:
-            X[col] = le.fit_transform(X[col].astype(str))
-    else:
-        raise ValueError(f"model_family '{model_family}' not supported.")
-
-    # === SCALING ===
-    scaler = MinMaxScaler()
-    X[X.columns] = scaler.fit_transform(X)
-
-    # === SPLIT ===
+    # === SPLIT ÖNCE (leakage önlemek için) ===
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=y
     )
 
+    # === IMPUTATION (sadece train istatistikleri) ===
+    num_medians = {col: X_train[col].median()
+                   for col in num_cols if X_train[col].isnull().any()}
+    cat_modes   = {col: X_train[col].mode()[0]
+                   for col in cat_cols if X_train[col].isnull().any()}
+
+    for col, val in num_medians.items():
+        X_train[col] = X_train[col].fillna(val)
+        X_test[col]  = X_test[col].fillna(val)
+    for col, val in cat_modes.items():
+        X_train[col] = X_train[col].fillna(val)
+        X_test[col]  = X_test[col].fillna(val)
+
+    # === ENCODING ===
+    if model_family == "fnn":
+        X_train = pd.get_dummies(X_train, columns=cat_cols, drop_first=False)
+        X_test  = pd.get_dummies(X_test,  columns=cat_cols, drop_first=False)
+        for col in X_train.columns:
+            if col not in X_test.columns:
+                X_test[col] = 0
+        X_test = X_test[X_train.columns]
+    elif model_family == "tabnet":
+        le = LabelEncoder()
+        for col in cat_cols:
+            X_train[col] = le.fit_transform(X_train[col].astype(str))
+            X_test[col]  = le.transform(X_test[col].astype(str))
+    else:
+        raise ValueError(f"model_family '{model_family}' not supported.")
+
+    # === SCALING (sadece train'e fit, test'e transform) ===
+    scaler = MinMaxScaler()
+    X_train[X_train.columns] = scaler.fit_transform(X_train)
+    X_test[X_test.columns]   = scaler.transform(X_test)
+
     # === CLASS WEIGHTS ===
-    n = len(y_train)
+    n      = len(y_train)
     n_bad  = y_train.sum()
     n_good = n - n_bad
     class_weights = {
