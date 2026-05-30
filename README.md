@@ -39,21 +39,23 @@ All models achieve AUC-ROC >= 0.75 on all datasets (FNN) and 3/4 datasets (TabNe
 
 ## Repository Structure
 
-    explainable-credit-nn/
-├── data/                  # raw datasets (gitignored)
-├── models/                # trained checkpoints (.pt, .zip)
-├── src/
-│   ├── preprocessing/     # unified pipeline (split-first, no leakage)
-│   ├── models/            # FNN, TabNet, train_utils
-│   ├── explainers/        # SHAP, IG, DiCE, TabNet explainers
-│   └── evaluation/        # OpenXAI metrics
-├── dashboard/             # Streamlit application
-├── reports/               # CSVs and figures
-│   ├── fnn_vs_tabnet_benchmark.csv
-│   ├── openxai_results.csv
-│   ├── dice_results.csv
-│   └── figures/           # per-dataset XAI plots
-└── requirements.txt
+```
+explainable-credit-nn/
+|-- data/                  # raw datasets (gitignored)
+|-- models/                # trained checkpoints (.pt, .zip)
+|-- src/
+|   |-- preprocessing/     # unified pipeline (split-first, no leakage)
+|   |-- models/            # FNN, TabNet, train_utils
+|   |-- explainers/        # SHAP, IG, DiCE, TabNet explainers
+|   `-- evaluation/        # OpenXAI metrics
+|-- dashboard/             # Streamlit application
+|-- reports/               # CSVs and figures
+|   |-- fnn_vs_tabnet_benchmark.csv
+|   |-- openxai_results.csv
+|   |-- dice_results.csv
+|   `-- figures/           # per-dataset XAI plots
+`-- requirements.txt
+```
 
 ## Setup
 
