@@ -6,14 +6,15 @@ import torch
 import streamlit as st
 import matplotlib.pyplot as plt
 import shap
+from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.abspath("."))
 
 from src.models.train_utils import get_trained_fnn
 from src.models.tabnet_model import get_trained_tabnet
 from src.preprocessing.pipeline import prepare
+from src.explainers.dice_explainer import _get_dataset_config, _align_columns, decode
 
-# ── Page config ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Explainable Credit Decisions",
     page_icon="🏦",
@@ -27,7 +28,6 @@ DATASETS = {
     "Give Me Some Credit": "gmsc",
 }
 
-# ── Cache model loading ───────────────────────────────────────
 @st.cache_resource
 def load_fnn(dataset):
     model, X_train, X_test, y_train, y_test, X_train_t, X_test_t = \
@@ -39,7 +39,6 @@ def load_tabnet(dataset):
     model, X_train, X_test, y_train, y_test = get_trained_tabnet(dataset)
     return model, X_train, X_test, y_train, y_test
 
-# ── Sidebar ───────────────────────────────────────────────────
 st.sidebar.title("🏦 XAI Credit Dashboard")
 st.sidebar.markdown("---")
 page = st.sidebar.radio(
@@ -54,7 +53,6 @@ if page == "📊 Model Performance":
     st.title("📊 Model Performance — FNN vs TabNet")
     st.markdown("Comparison of FNN and TabNet across all four benchmark datasets.")
 
-    # Benchmark tablosu
     bench_path = "reports/fnn_vs_tabnet_benchmark.csv"
     if os.path.exists(bench_path):
         df = pd.read_csv(bench_path)
@@ -90,14 +88,12 @@ if page == "📊 Model Performance":
             st.pyplot(fig)
             plt.close()
 
-        # Detay tablosu
         st.subheader("Detailed Metrics")
         detail_cols = ["dataset", "fnn_auc", "fnn_recall", "fnn_f1",
                        "tabnet_auc", "tabnet_recall", "tabnet_f1"]
         available = [c for c in detail_cols if c in df.columns]
         st.dataframe(df[available], use_container_width=True)
 
-        # OpenXAI sonuclari
         xai_path = "reports/openxai_results.csv"
         if os.path.exists(xai_path):
             st.subheader("OpenXAI Evaluation Metrics")
@@ -147,23 +143,22 @@ else:
 
         st.markdown("---")
 
-        # SHAP (sadece FNN)
         if model_choice == "FNN":
             st.subheader("SHAP Feature Attribution")
             with st.spinner("Computing SHAP..."):
                 torch.manual_seed(42)
                 bg_idx  = torch.randperm(len(X_train_t))[:50]
                 bg_data = X_train_t[bg_idx]
-                explainer   = shap.GradientExplainer(model, bg_data)
-                shap_vals   = explainer.shap_values(X_test_t_sample)
+                explainer = shap.GradientExplainer(model, bg_data)
+                shap_vals = explainer.shap_values(X_test_t_sample)
                 if isinstance(shap_vals, list):
                     shap_vals = shap_vals[0]
                 if hasattr(shap_vals, 'ndim') and shap_vals.ndim == 3:
                     shap_vals = shap_vals[:, :, 0]
 
-                feat_names   = X_train.columns.tolist()
-                mean_abs     = np.abs(shap_vals[0])
-                top10_idx    = np.argsort(mean_abs)[::-1][:10]
+                feat_names = X_train.columns.tolist()
+                mean_abs   = np.abs(shap_vals[0])
+                top10_idx  = np.argsort(mean_abs)[::-1][:10]
 
                 fig, ax = plt.subplots(figsize=(8, 5))
                 colors = ["red" if v > 0 else "blue"
@@ -179,8 +174,6 @@ else:
                 plt.tight_layout()
                 st.pyplot(fig)
                 plt.close()
-
-        # TabNet attention
         else:
             st.subheader("TabNet Attention Weights")
             with st.spinner("Extracting attention masks..."):
@@ -202,18 +195,109 @@ else:
                 st.pyplot(fig)
                 plt.close()
 
-        # Top features tablosu
         st.subheader("Top 10 Important Features")
-        if model_choice == "FNN":
-            vals = shap_vals[0]
-        else:
-            vals = importance
+        vals = shap_vals[0] if model_choice == "FNN" else importance
 
         top10 = np.argsort(np.abs(vals))[::-1][:10]
         df_feat = pd.DataFrame({
-            "Feature": [feat_names[i] for i in top10],
-            "Value":   [f"{vals[i]:.4f}" for i in top10],
-            "Direction": ["↑ Risk" if vals[i] > 0 else "↓ Risk"
-                          for i in top10]
+            "Feature":   [feat_names[i] for i in top10],
+            "Value":     [f"{vals[i]:.4f}" for i in top10],
+            "Direction": ["↑ Risk" if vals[i] > 0 else "↓ Risk" for i in top10]
         })
         st.dataframe(df_feat, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("💡 Action Plan — What should this applicant change?")
+
+        if prob >= 0.5:
+            with st.spinner("Generating counterfactual suggestions..."):
+                try:
+                    import dice_ml
+                    from dice_ml import Dice
+                    from sklearn.preprocessing import MinMaxScaler
+
+                    df_dice, cat_cols_d, num_cols_d, immutable_d = \
+                        _get_dataset_config(dataset_key)
+
+                    scaler_d = MinMaxScaler()
+                    df_dice[num_cols_d] = scaler_d.fit_transform(df_dice[num_cols_d])
+                    raw_cols = [c for c in df_dice.columns if c != "target"]
+                    ref_cols = X_train.columns.tolist()
+
+                    def _wrapper_predict(X_inp):
+                        if isinstance(X_inp, pd.DataFrame):
+                            X_inp = X_inp[raw_cols]
+                        else:
+                            X_inp = pd.DataFrame(X_inp, columns=raw_cols)
+                        if cat_cols_d:
+                            X_enc = pd.get_dummies(X_inp, columns=cat_cols_d,
+                                                   drop_first=False)
+                        else:
+                            X_enc = X_inp.copy()
+                        X_enc = _align_columns(X_enc, ref_cols)
+                        if model_choice == "FNN":
+                            X_t = torch.tensor(X_enc.values, dtype=torch.float32)
+                            with torch.no_grad():
+                                p = torch.sigmoid(model(X_t)).numpy().flatten()
+                        else:
+                            p = model.predict_proba(X_enc.values)[:, 1]
+                        return np.column_stack([1 - p, p])
+
+                    class WrapperModel:
+                        def predict_proba(self, X):
+                            return _wrapper_predict(X)
+
+                    cont_feats = num_cols_d if num_cols_d else raw_cols
+                    d_dice  = dice_ml.Data(dataframe=df_dice,
+                                           continuous_features=cont_feats,
+                                           outcome_name="target")
+                    m_dice  = dice_ml.Model(model=WrapperModel(), backend="sklearn")
+                    exp_dice = Dice(d_dice, m_dice, method="random")
+
+                    _, df_test_dice = train_test_split(
+                        df_dice, test_size=0.2, random_state=42,
+                        stratify=df_dice["target"])
+                    bad_dice = df_test_dice[df_test_dice["target"] == 1]\
+                        .reset_index(drop=True)
+
+                    query = bad_dice.iloc[[min(n_samples, len(bad_dice)-1)]][raw_cols]
+                    vary  = [f for f in raw_cols if f not in immutable_d]
+
+                    cf    = exp_dice.generate_counterfactuals(
+                        query, total_CFs=3,
+                        desired_class="opposite",
+                        features_to_vary=vary)
+                    cf_df = cf.cf_examples_list[0].final_cfs_df
+
+                    if cf_df is not None and len(cf_df) > 0:
+                        for j, (_, row_cf) in enumerate(cf_df.iterrows()):
+                            changes = []
+                            for feat in raw_cols:
+                                orig_v = query[feat].values[0]
+                                new_v  = row_cf[feat]
+                                if str(orig_v) != str(new_v):
+                                    if feat in num_cols_d:
+                                        idx_n      = num_cols_d.index(feat)
+                                        d_o        = np.zeros(len(num_cols_d))
+                                        d_n        = np.zeros(len(num_cols_d))
+                                        d_o[idx_n] = float(orig_v)
+                                        d_n[idx_n] = float(new_v)
+                                        r_o = scaler_d.inverse_transform([d_o])[0][idx_n]
+                                        r_n = scaler_d.inverse_transform([d_n])[0][idx_n]
+                                        if abs(r_o - r_n) >= 0.01:
+                                            changes.append(
+                                                f"**{feat}**: {r_o:.2f} → {r_n:.2f}")
+                                    else:
+                                        orig_decoded = decode(orig_v) if dataset_key == "german_credit" else str(orig_v)
+                                        new_decoded  = decode(new_v)  if dataset_key == "german_credit" else str(new_v)
+                                        changes.append(
+                                            f"**{feat}**: {orig_decoded} → {new_decoded}")
+                            if changes:
+                                st.markdown(f"**Scenario {j+1}:** " + " | ".join(changes))
+                    else:
+                        st.info("No counterfactual found for this applicant.")
+
+                except Exception as e:
+                    st.warning(f"DiCE could not generate suggestions: {e}")
+        else:
+            st.success("This applicant is already APPROVED — no changes needed.")
