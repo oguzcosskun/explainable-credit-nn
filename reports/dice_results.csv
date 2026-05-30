@@ -1,0 +1,5 @@
+dataset,validity,proximity,n_eval
+german_credit,1.0,0.0496,50
+heloc,0.98,0.0495,50
+adult,1.0,0.0292,50
+gmsc,1.0,0.0923,50

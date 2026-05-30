@@ -1,0 +1,5 @@
+dataset,group_attr,group,ris,dice_validity,dice_proximity
+german_credit,personal_status,Female,0.9496999979019165,1.0,0.0503
+german_credit,personal_status,Male,0.9452999830245972,1.0,0.0559
+adult,sex,Male,,1.0,0.0279
+adult,sex,Female,,1.0,0.0285
