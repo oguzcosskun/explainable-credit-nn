@@ -28,6 +28,13 @@ DATASETS = {
     "Give Me Some Credit": "gmsc",
 }
 
+DATASET_SIZES = {
+    "german_credit": 199,
+    "heloc":         2091,
+    "adult":         6512,
+    "gmsc":          29999,
+}
+
 @st.cache_resource
 def load_fnn(dataset):
     model, X_train, X_test, y_train, y_test, X_train_t, X_test_t = \
@@ -46,9 +53,6 @@ page = st.sidebar.radio(
     ["📊 Model Performance", "🔍 Credit Decision Explorer"]
 )
 
-# ══════════════════════════════════════════════════════════════
-# PAGE 1: Model Performance
-# ══════════════════════════════════════════════════════════════
 if page == "📊 Model Performance":
     st.title("📊 Model Performance — FNN vs TabNet")
     st.markdown("Comparison of FNN and TabNet across all four benchmark datasets.")
@@ -99,7 +103,7 @@ if page == "📊 Model Performance":
             st.subheader("OpenXAI Evaluation Metrics")
             df_xai = pd.read_csv(xai_path)
             st.dataframe(df_xai, use_container_width=True)
-            # Fairness Audit sonuclari
+
         fairness_path = "reports/fairness_audit.csv"
         if os.path.exists(fairness_path):
             st.subheader("Fairness Audit — Demographic Group Analysis")
@@ -113,9 +117,6 @@ if page == "📊 Model Performance":
     else:
         st.warning("Benchmark CSV not found. Run `train_all_datasets.py` first.")
 
-# ══════════════════════════════════════════════════════════════
-# PAGE 2: Credit Decision Explorer
-# ══════════════════════════════════════════════════════════════
 else:
     st.title("🔍 Credit Decision Explorer")
 
@@ -125,7 +126,8 @@ else:
         dataset_name = st.selectbox("Select Dataset", list(DATASETS.keys()))
         dataset      = DATASETS[dataset_name]
         model_choice = st.radio("Model", ["FNN", "TabNet"])
-        n_samples    = st.slider("Test sample index", 0, 199, 0)
+        max_idx      = DATASET_SIZES.get(dataset, 199)
+        n_samples    = st.slider("Test sample index", 0, max_idx, 0)
 
     dataset_key = dataset
 
