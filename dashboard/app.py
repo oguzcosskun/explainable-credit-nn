@@ -13,7 +13,14 @@ sys.path.insert(0, os.path.abspath("."))
 from src.models.train_utils import get_trained_fnn
 from src.models.tabnet_model import get_trained_tabnet
 from src.preprocessing.pipeline import prepare
-from src.explainers.dice_explainer import _get_dataset_config, _align_columns, decode
+from src.explainers.dice_explainer import _get_dataset_config, _align_columns, decode, UCI_LABELS
+
+def decode_feature(feat):
+    """checking_account_A11 → checking_account: < 0 DM"""
+    parts = feat.rsplit("_", 1)
+    if len(parts) == 2 and parts[1] in UCI_LABELS:
+        return f"{parts[0]}: {UCI_LABELS[parts[1]]}"
+    return feat
 
 st.set_page_config(
     page_title="Explainable Credit Decisions",
@@ -169,6 +176,8 @@ else:
                     shap_vals = shap_vals[:, :, 0]
 
                 feat_names = X_train.columns.tolist()
+                if dataset_key == "german_credit":
+                    feat_names = [decode_feature(f) for f in feat_names]
                 mean_abs   = np.abs(shap_vals[0])
                 top10_idx  = np.argsort(mean_abs)[::-1][:10]
 
@@ -192,6 +201,8 @@ else:
                 explain_matrix, _ = model.explain(
                     X_test.iloc[n_samples:n_samples+1].values)
                 feat_names = X_train.columns.tolist()
+                if dataset_key == "german_credit":
+                    feat_names = [decode_feature(f) for f in feat_names]
                 importance = explain_matrix[0]
                 top10_idx  = np.argsort(importance)[::-1][:10]
 
